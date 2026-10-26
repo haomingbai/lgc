@@ -1,8 +1,8 @@
 # Luogu Upstream API Reference
 
 This document describes the Luogu web API used by the project to authenticate,
-open a problem, submit source code, and retrieve judge results. The base URL is
-`https://www.luogu.com.cn`.
+optionally read problem content, submit source code, and retrieve judge
+results. The base URL is `https://www.luogu.com.cn`.
 
 The API is a browser-facing service rather than a stable public API. Its
 headers, cookies, routes, language IDs, and challenge behavior can change
@@ -14,16 +14,21 @@ Claims in this reference use three status labels:
 
 | Status | Meaning |
 |---|---|
-| **Verified** | Directly observed in the captured request/response or runtime configuration described in the evidence section. |
+| **Verified** | Directly observed in the captured request/response, runtime configuration, or controlled live test described in the evidence section. |
 | **Inferred** | Consistent with the capture or client behavior but not exercised end-to-end in the available evidence. |
 | **Unverified** | Reproduced only from an analysis note or historical client behavior; revalidate before relying on it. |
 
-The capture demonstrates one successful password-login flow, one source-code
-submission, one pending record read, and one WebSocket record update. It does
-not contain a successful `/api/verify/captcha` request, an answer-file
-submission, a contest submission, or an interactive CAPTCHA exchange.
+The original capture demonstrates one successful password-login flow, one
+source-code submission, one pending record read, and one WebSocket record
+update. A later live test exercised the submission CAPTCHA branch and showed
+that a submission does not require a problem-page request.
 
-## Verified request flow
+Neither evidence source demonstrates an answer-file submission, a contest
+submission, or a provider-specific interactive challenge exchange.
+
+## Observed request flows
+
+### Captured browser flow
 
 ```text
 GET  /auth/login
@@ -39,24 +44,122 @@ GET  /record/<rid>                            -> current record JSON
 GET  wss://ws2.luogu.com.cn/ws                -> record update
 ```
 
-The first redirect in each challenge flow is part of the contract observed in
-the capture. Follow redirects with a cookie jar enabled and retain cookies set
-by the final response.
+This sequence records the browser's UI behavior. The problem-page request is
+not a submission dependency.
+
+### Live-tested direct-submission flow
+
+```text
+GET  /                                        -> authenticated CSRF token
+POST /fe/api/problem/submit/<pid>             -> 403 CAPTCHA required
+GET  /api/verify/captcha                      -> image challenge
+POST /fe/api/problem/submit/<pid>             -> {"rid": <number>}
+GET  /record/<rid>                            -> current record JSON
+```
+
+The live test never requested `/problem/<pid>` or another problem page. The
+retry POST was the original submission body plus one `captcha` field.
+
+This test triggered risk-control CAPTCHA. That challenge is conditional: the
+original browser capture submitted without one. Clients should attempt the base
+POST first and enter the CAPTCHA branch only when the response requests it.
+
+A `302` self-redirect may occur while obtaining a page or challenge. Follow it
+with a cookie jar enabled only when it is present; a redirect is not a universal
+precondition.
 
 ## Endpoint index
 
-| Method | Path | Evidence | Purpose |
+| Method | Path | Evidence | Data provided by the endpoint |
 |---|---|---|---|
-| `GET` | `/auth/login` | Verified | Load the login page and obtain a CSRF token |
-| `GET` | `/auth/login-methods` | Verified | Discover available login methods |
-| `GET` | `/lg4/captcha` | Verified | Obtain the login image CAPTCHA and rotate `C3VK` |
-| `POST` | `/do-auth/password` | Verified | Authenticate with a password and CAPTCHA |
-| `GET` | `/problem/{pid}` | Verified | Load a problem and obtain page-scoped state |
-| `POST` | `/fe/api/problem/submit/{pid}` | Verified | Submit source code for asynchronous judging |
-| `GET` | `/record/{rid}` | Verified | Read the current judge record |
-| `GET` | `/_lfe/config/auth` | Verified | Resolve routes and runtime numeric IDs |
-| `GET` | `wss://ws2.luogu.com.cn/ws` | Verified | Receive record updates over WebSocket |
-| `GET` | `/api/verify/captcha` | Unverified | Retrieve a submission CAPTCHA after risk control |
+| `GET` | `/` | Verified | Authenticated HTML and a CSRF meta token |
+| `GET` | `/auth/login` | Verified | Login HTML and a login CSRF meta token |
+| `GET` | `/auth/login-methods` | Verified | Available login method names and the default method |
+| `GET` | `/lg4/captcha` | Verified | Login CAPTCHA image and rotating challenge cookies |
+| `POST` | `/do-auth/password` | Verified | Authenticated session cookies and login JSON |
+| `GET` | `/_lfe/config/auth` | Verified | Route templates, language IDs, and record-status IDs |
+| `GET` | `/problem/{pid}` | Verified | Problem HTML and optional problem content |
+| `POST` | `/fe/api/problem/submit/{pid}` | Verified | A RID, or a CAPTCHA challenge error |
+| `GET` | `/api/verify/captcha` | Verified | Submission CAPTCHA image and any updated cookies |
+| `GET` | `/record/{rid}` | Verified | Current judge-record snapshot |
+| `GET` | `wss://ws2.luogu.com.cn/ws` | Verified | Asynchronous record updates |
+
+### Minimal data-source map
+
+This table identifies the smallest observed source for each value used by the
+submission workflow. "Caller" means data supplied to the client rather than
+obtained from Luogu.
+
+| Requirement | Source | When needed |
+|---|---|---|
+| Problem ID | Caller | Every submission |
+| Authenticated cookies | `POST /do-auth/password` response | Every authenticated request |
+| CSRF token | `GET /` HTML in the live test | Authenticated JSON requests |
+| Language ID | `GET /_lfe/config/auth` response | Resolve the requested language |
+| Source text and O2 choice | Caller | Every submission |
+| First submission result | `POST /fe/api/problem/submit/{pid}` response | Always |
+| Submission CAPTCHA | `GET /api/verify/captcha`, only after a CAPTCHA error | When the POST returns the verified challenge error |
+| RID | Successful submission response | Waiting and record retrieval |
+| Record snapshot | `GET /record/{rid}` | Until a terminal status |
+| Low-latency record updates | WebSocket | Optional; must not replace polling fallback |
+| Problem content | `GET /problem/{pid}` | Only when the caller requests content |
+
+### Endpoint parameter sources
+
+This table is the authoritative cross-endpoint reference for data-bearing
+request parameters. Protocol constants such as `Host`, `Origin`, and static
+`Accept` values do not require another endpoint.
+
+| Endpoint | Parameter | Source or reference |
+|---|---|---|
+| `GET /` | `Cookie` | Current cookie jar; authenticated `_uid` and `__client_id` come from `POST /do-auth/password` |
+| `GET /auth/login` | `Cookie` | Current cookie jar, including cookies established by preceding site navigation |
+| `GET /_lfe/config/auth` | `_version` query | The HTML/client runtime loaded from a page such as `GET /auth/login`; this endpoint does not return its own `_version` |
+| `GET /_lfe/config/auth` | `Cookie` | Current cookie jar |
+| `GET /auth/login-methods` | `login` query | Caller-provided account identifier |
+| `GET /auth/login-methods` | `X-CSRF-Token` | The CSRF meta token from `GET /auth/login` |
+| `GET /auth/login-methods` | `Cookie` | Current cookie jar or the jar stored after `GET /auth/login` |
+| `GET /auth/login-methods` | `Referer` | `https://www.luogu.com.cn/auth/login` |
+| `GET /lg4/captcha` | `_t` query | Client-generated timestamp |
+| `GET /lg4/captcha` | `Cookie` | Current cookie jar; preserve cookies set by each challenge response |
+| `GET /lg4/captcha` | `Referer` | `https://www.luogu.com.cn/auth/login` |
+| `POST /do-auth/password` | `username`, `password` | Caller-provided credentials |
+| `POST /do-auth/password` | `captcha` | The image returned by `GET /lg4/captcha`, processed by the CAPTCHA solver |
+| `POST /do-auth/password` | `X-CSRF-Token` | The CSRF meta token from `GET /auth/login` |
+| `POST /do-auth/password` | `C3VK` | The latest `C3VK` cookie from the `GET /lg4/captcha` challenge flow |
+| `POST /do-auth/password` | `_uid`, `__client_id` | The current anonymous cookie jar populated by preceding main-site responses |
+| `POST /do-auth/password` | `Referer` | `https://www.luogu.com.cn/auth/login` |
+| `GET /problem/{pid}` | `pid` | Caller or an existing `Problem` object |
+| `GET /problem/{pid}` | `Cookie` | Authenticated cookie jar from `POST /do-auth/password` |
+| `GET /problem/{pid}` | `Referer` | `https://www.luogu.com.cn/` |
+| `POST /fe/api/problem/submit/{pid}` | `pid` | Caller or the `Problem` object being submitted |
+| `POST /fe/api/problem/submit/{pid}` | `X-CSRF-Token` | Authenticated CSRF meta token from `GET /` |
+| `POST /fe/api/problem/submit/{pid}` | `Cookie` | Authenticated cookie jar from `POST /do-auth/password` |
+| `POST /fe/api/problem/submit/{pid}` | `Referer` | `https://www.luogu.com.cn/` in the live test |
+| `POST /fe/api/problem/submit/{pid}` | `lang` | `CodeLanguage.*.id` from `GET /_lfe/config/auth` |
+| `POST /fe/api/problem/submit/{pid}` | `code` | Caller-provided source text |
+| `POST /fe/api/problem/submit/{pid}` | `enableO2` | Caller-provided O2 choice |
+| `POST /fe/api/problem/submit/{pid}` | `captcha` | Only after a CAPTCHA error: the image from `GET /api/verify/captcha`, processed by the CAPTCHA solver |
+| `GET /api/verify/captcha` | Trigger | The preceding submission response from `POST /fe/api/problem/submit/{pid}` |
+| `GET /api/verify/captcha` | `_t` query | Client-generated timestamp |
+| `GET /api/verify/captcha` | `X-CSRF-Token` | Authenticated CSRF meta token from `GET /` |
+| `GET /api/verify/captcha` | `Cookie` | Authenticated cookie jar plus cookies updated by the submission CAPTCHA flow |
+| `GET /api/verify/captcha` | `Referer` | `https://www.luogu.com.cn/` in the live test |
+| `GET /record/{rid}` | `rid` | The successful `POST /fe/api/problem/submit/{pid}` response |
+| `GET /record/{rid}` | `X-CSRF-Token` | Authenticated CSRF meta token from `GET /` |
+| `GET /record/{rid}` | `Cookie` | Authenticated cookie jar from `POST /do-auth/password` |
+| `GET /record/{rid}` | `Referer` | `https://www.luogu.com.cn/` in the live test |
+| WebSocket | URL | The captured `wss://ws2.luogu.com.cn/ws` endpoint; runtime discovery is unverified |
+| WebSocket | `Cookie` | Authenticated cookie jar from `POST /do-auth/password` |
+| WebSocket | `Origin` | Static web-client value `https://fecdn.luogu.com.cn` |
+
+The exclusive source of an authenticated CSRF token has not been established.
+The live test proves that the root page works and that the problem page is not
+required.
+
+Response fields are provided by the endpoint documented in the section where
+they appear; they are not obtained from a different Luogu API unless the text
+explicitly says so.
 
 ## Shared state and headers
 
@@ -76,12 +179,14 @@ The successful login response sets both `_uid` and `__client_id` with
 `Max-Age=2592000`. Treat all cookie values as opaque. Do not serialize them
 into logs, source code, documentation, or bug reports.
 
-The capture shows `C3VK` changing during each two-request challenge flow.
-After following a redirect, use the latest value from the final response.
+`C3VK` can rotate when a challenge endpoint issues `Set-Cookie`. Preserve the
+latest value in the session cookie jar. The live submission CAPTCHA request
+returned the image directly, so a two-request redirect flow is possible but not
+required for every challenge.
 
 ### CSRF
 
-The CSRF token is not a cookie. Read it from the login or problem HTML:
+The CSRF token is not a cookie. Read it from an HTML `<meta>` element:
 
 ```html
 <meta name="csrf-token" content="<csrf-token>">
@@ -94,8 +199,12 @@ X-CSRF-Token: <csrf-token>
 ```
 
 The capture uses the login-page token for login-method discovery and password
-login. It later uses the final problem-page token for submission and record
-reading. Refresh the token after reloading the corresponding HTML page.
+login. The live test read a fresh token from `GET /` and used it for submission,
+the submission CAPTCHA request, and record polling without loading the problem
+page.
+
+Refresh the token if it is missing or rejected. Do not fetch a problem page
+solely to obtain one.
 
 Do not confuse `X-CSRF-Token` with `syncToken`, `C3VK`, or `__client_id`.
 
@@ -109,16 +218,40 @@ X-Requested-With: XMLHttpRequest
 Origin: https://www.luogu.com.cn
 ```
 
-Use the relevant page URL as `Referer`. These headers are useful for
-compatibility with the web client, but the capture does not prove that every
-header is independently required by the server.
+The captured browser used the current problem page as `Referer`. The live test
+used `https://www.luogu.com.cn/` for direct submission, submission CAPTCHA, and
+record polling. These headers matched the tested client behavior, but no
+evidence establishes that every header is independently required.
+
+## `GET /`
+
+**Evidence:** Verified by the controlled live submission test on 2026-10-26.
+
+### Request
+
+```http
+GET / HTTP/2
+Host: www.luogu.com.cn
+Accept: text/html
+Cookie: <authenticated-cookie-jar>
+```
+
+### Response
+
+The observed response was HTTP `200` with HTML containing the CSRF `<meta>`
+element. In the live test, the token was used for direct submission, the
+submission CAPTCHA request, and record polling.
+
+This endpoint provides an authenticated HTML page and CSRF token. It does not
+provide problem content. The test does not establish that the root page is the
+only source of a usable authenticated CSRF token.
 
 ## Runtime configuration
 
 ## `GET /_lfe/config/auth`
 
-**Evidence:** Verified in frames 3323 (request), 3341 (response headers), and
-3343 (decompressed JSON).
+**Evidence:** Verified by the runtime configuration response observed in the
+browser capture on 2026-10-24.
 
 ### Request
 
@@ -129,8 +262,9 @@ Accept: application/json, text/plain, */*
 X-Requested-With: XMLHttpRequest
 ```
 
-The captured page supplied the `_version` value. Whether the endpoint works
-without that query parameter is unverified.
+The captured page's client runtime supplied the `_version` value; it is not
+returned by this configuration endpoint. Whether the endpoint works without
+that query parameter is unverified.
 
 ### Response
 
@@ -181,7 +315,7 @@ These counts are observations from the capture, not permanent guarantees.
 
 ## `GET /auth/login`
 
-**Evidence:** Verified in frames 3135, 3151, and 3152.
+**Evidence:** Verified by the browser capture on 2026-10-24.
 
 ### Request
 
@@ -202,8 +336,7 @@ captured login flow. Re-fetch the page instead of guessing a token.
 
 ## `GET /auth/login-methods`
 
-**Evidence:** Verified in frames 3822 (request), 3837 (response headers), and
-3839 (decompressed JSON).
+**Evidence:** Verified by the browser capture on 2026-10-24.
 
 ### Request
 
@@ -235,10 +368,12 @@ Only the password path is verified end-to-end. Route configuration mentions
 FIDO2, TOTP, and MOTP endpoints, but their request and response contracts are
 **Unverified**.
 
+The account identifier comes from the caller. The CSRF token and cookies come
+from `GET /auth/login` and the current session jar.
+
 ## `GET /lg4/captcha`
 
-**Evidence:** Verified in frames 3841 and 3843 (first request and `302`), then
-3847 and 3855 (replay and final image).
+**Evidence:** Verified by the browser capture on 2026-10-24.
 
 ### Request
 
@@ -279,10 +414,12 @@ Set-Cookie: C3VK=<latest-value>; Max-Age=300; Path=/
 Present the final image to a human and use the latest `C3VK` cookie in the
 password request. CAPTCHA answers are single-use.
 
+This endpoint provides only the login challenge. It does not provide submission
+data or depend on a problem page.
+
 ## `POST /do-auth/password`
 
-**Evidence:** Verified in frames 4177 (request), 4190 (response headers), and
-4192 (decompressed JSON).
+**Evidence:** Verified by the browser capture on 2026-10-24.
 
 ### Request
 
@@ -314,6 +451,10 @@ Cookie: C3VK=<latest-login-c3vk>; _uid=<anonymous-uid>; __client_id=<anonymous-c
 
 Do not log or persist the password or CAPTCHA answer.
 
+The username and password come from the caller. The login CSRF token comes from
+`GET /auth/login`; the CAPTCHA answer comes from the image returned by
+`GET /lg4/captcha`; and the current cookies come from the session jar.
+
 ### Success response
 
 The captured response was HTTP `200` with gzip-compressed JSON:
@@ -342,12 +483,14 @@ On any malformed or error response, discard the current CSRF and CAPTCHA state,
 then restart the login flow if another manual attempt is appropriate. Do not
 retry a consumed CAPTCHA automatically.
 
-## Problem and submission
+## Problem information and submission
 
 ## `GET /problem/{pid}`
 
-**Evidence:** Verified in frames 4956 and 4958 (first request and `302`), then
-4960, 5004, and the following response data (replay and final HTML).
+**Evidence:** Verified by the browser capture on 2026-10-24.
+
+This endpoint provides problem-page data. It is not required by the verified
+submission flow and should remain independent from submission.
 
 ### Request
 
@@ -360,6 +503,9 @@ Cookie: <authenticated-cookie-jar>
 ```
 
 `pid` is an opaque problem identifier such as `P1001`.
+
+The caller supplies `pid`. The authenticated cookie jar comes from
+`POST /do-auth/password`.
 
 ### Redirect and final response
 
@@ -377,13 +523,15 @@ Content-Type: text/html; charset=UTF-8
 Set-Cookie: C3VK=<latest-value>; Max-Age=300; Path=/
 ```
 
-The final HTML contained a CSRF meta token. Use the latest `C3VK` and final
-page token for the subsequent submission and record request.
+The final HTML contained problem content and a CSRF meta token. These values
+describe this page response; they are not required inputs to submission. The
+live test obtained a usable CSRF token from `GET /` instead and did not request
+this endpoint.
 
 ## `POST /fe/api/problem/submit/{pid}`
 
-**Evidence:** Verified in frames 7387 (request), 7426 (response headers), and
-7428 (decompressed JSON).
+**Evidence:** Verified by the browser capture on 2026-10-24, then revalidated by
+a controlled live test on 2026-10-26 without any problem-page request.
 
 ### Source-code request
 
@@ -393,10 +541,10 @@ Host: www.luogu.com.cn
 Content-Type: application/json
 Accept: application/json, text/plain, */*
 X-Requested-With: XMLHttpRequest
-X-CSRF-Token: <problem-csrf-token>
+X-CSRF-Token: <authenticated-csrf-token>
 Origin: https://www.luogu.com.cn
-Referer: https://www.luogu.com.cn/problem/<pid>
-Cookie: C3VK=<latest-problem-c3vk>; _uid=<authenticated-uid>; __client_id=<authenticated-client-id>
+Referer: https://www.luogu.com.cn/
+Cookie: <authenticated-cookie-jar>
 ```
 
 ```json
@@ -416,6 +564,15 @@ Cookie: C3VK=<latest-problem-c3vk>; _uid=<authenticated-uid>; __client_id=<authe
 The capture used `lang: 34` for C++23. The example above uses `27` only
 because C++20 is enabled in the captured configuration.
 
+The request combines data from independent sources:
+
+- The caller supplies `pid`, source code, O2 choice, and the requested language.
+- `GET /_lfe/config/auth` supplies the runtime language ID for that language.
+- `POST /do-auth/password` supplies the authenticated cookies.
+- `GET /` supplied the CSRF token in the live test.
+
+No problem-page request is part of this request's verified dependency set.
+
 ### Success response
 
 ```http
@@ -434,27 +591,26 @@ Content-Encoding: gzip
 opaque identifier when constructing `/record/<rid>`. The submission response
 does not contain the final verdict; judging is asynchronous.
 
-### Unverified request variants
+### Remaining unverified request variants
 
-The pre-review document described these variants, but the capture does not
-exercise them:
+The available evidence does not exercise these variants:
 
 | Variant | Status | Caveat |
 |---|---|---|
 | `multipart/form-data` answer-file upload | **Unverified** | Field names and accepted file types were not observed |
 | `?contestId=<id>` query parameter | **Unverified** | Contest routing and required context were not exercised |
-| JSON `captcha` retry field | **Unverified** | See the challenge section below |
 | Interactive CAPTCHA token format | **Unverified** | Do not implement from the historical description without a new capture |
 
 Do not claim support for these variants until a sanitized request and response
-have been captured and added as evidence.
+have been observed and added as evidence. The JSON `captcha` retry field is
+verified separately in the submission CAPTCHA section.
 
 ## Judge records
 
 ## `GET /record/{rid}`
 
-**Evidence:** Verified in frames 7537 (request), 7558 (response headers), and
-7559 (decompressed JSON).
+**Evidence:** Verified by the browser capture on 2026-10-24, then revalidated by
+the live submission test on 2026-10-26.
 
 ### Request
 
@@ -464,14 +620,18 @@ Host: www.luogu.com.cn
 Accept: application/json, text/plain, */*
 X-Requested-With: XMLHttpRequest
 X-Lentille-Request: content-only
-Referer: https://www.luogu.com.cn/problem/<pid>
-X-CSRF-Token: <problem-csrf-token>
-Cookie: C3VK=<problem-c3vk>; _uid=<authenticated-uid>; __client_id=<authenticated-client-id>
+Referer: https://www.luogu.com.cn/
+X-CSRF-Token: <authenticated-csrf-token>
+Cookie: <authenticated-cookie-jar>
 ```
 
-The captured record belonged to the authenticated account and was requested
-from the corresponding problem page. The capture does not establish whether
-public records can be read with a different authentication or header set.
+The RID comes from a successful `POST
+/fe/api/problem/submit/{pid}` response. The authenticated cookies come from
+login, and the CSRF token can come from `GET /`. The live test used those
+sources and polled successfully without visiting a problem page.
+
+The capture does not establish whether public records can be read with a
+different authentication or header set.
 
 ### Response
 
@@ -520,15 +680,18 @@ Important distinctions:
 While `data.record.status` is `0`, the record is still waiting. The capture
 shows `compileResult.success: false` even for this pending, non-terminal
 record. Do not classify the record as Compile Error until the overall record
-status is terminal.
+status is terminal. The live test observed terminal status `12` with
+`compileResult.success: true`.
 
 Poll with a bounded exponential backoff and stop once `data.record.status` is
-not `0` or `1`. The capture only directly observes `0` over HTTP and `2` over
-WebSocket; the rest of the status mapping comes from runtime configuration.
+not `0` or `1`. HTTP polling has directly observed `0` and `12`; WebSocket has
+directly observed `2`. Resolve the remaining status names from runtime
+configuration.
 
 ## Record status configuration
 
-**Evidence:** Verified in the decompressed config response, frame 3343.
+**Evidence:** Verified by the runtime configuration response observed in the
+browser capture on 2026-10-24.
 
 | ID | Type | Short name | Poll again |
 |---:|---|---|:---:|
@@ -556,8 +719,7 @@ single-record behavior. Resolve status names from a fresh
 
 ## `wss://ws2.luogu.com.cn/ws`
 
-**Evidence:** Verified in frames 5265 and 5295 (HTTP/1.1 upgrade to `101`) and
-frames 7591 and 7602 (record update).
+**Evidence:** Verified by the browser capture on 2026-10-24.
 
 ### Handshake
 
@@ -597,31 +759,79 @@ future pushes.
 
 ## Submission CAPTCHA branch
 
-**Status: Unverified.** The endpoint name exists in the runtime route map, but
-the capture contains no request to `/api/verify/captcha` and no submission
-response that requests a CAPTCHA.
+**Status: Verified.** The controlled live test on 2026-10-26 exercised this
+branch for `P1001` without requesting a problem page.
 
-The historical analysis describes this possible path:
+### Trigger from `POST /fe/api/problem/submit/{pid}`
 
-1. A submission can fail with CAPTCHA-related JSON.
-2. The client fetches an image from `/api/verify/captcha`.
-3. The endpoint can issue a self-redirect while setting `C3VK`.
-4. The client resubmits the original JSON body with a `captcha` field.
+The first submission POST used the normal source-code body and returned HTTP
+`403` with JSON whose `errorType` was:
 
-This behavior is plausible but not proven by the available artifacts. In
-particular, the following details are **Unverified**:
+```text
+Luogu\Exception\Request\InvalidCaptchaException
+```
 
-- exact HTTP status and error envelope;
-- whether the timestamp query parameter is required;
-- retry-count limits;
-- interactive challenge providers and token encoding;
-- signature/data fields used for an interactive provider;
-- whether a `403` response is returned before or after challenge state is set.
+Do not depend on the localized `data` or `errorMessage` text. The verified
+signal is the exact exception identifier together with the HTTP status.
 
-The client should detect the branch only from a live response, avoid unbounded
-retries, and require human interaction for an interactive challenge. Until a
-sanitized capture is added, do not advertise answer-file, contest, or
-interactive-CAPTCHA submission as supported features.
+The trigger and CAPTCHA image come from different endpoints:
+
+- `POST /fe/api/problem/submit/{pid}` reports that a challenge is required.
+- `GET /api/verify/captcha` provides the image challenge.
+
+The problem page provides neither value.
+
+### Challenge image from `GET /api/verify/captcha`
+
+The live request used the authenticated cookie jar and root-page CSRF token:
+
+```http
+GET /api/verify/captcha?_t=<fractional-millisecond-timestamp> HTTP/2
+Host: www.luogu.com.cn
+Accept: image/avif,image/jxl,image/webp,image/png,image/svg+xml,image/*
+X-CSRF-Token: <authenticated-csrf-token>
+Referer: https://www.luogu.com.cn/
+Cookie: <authenticated-cookie-jar>
+```
+
+### Challenge response
+
+The live run returned HTTP `200 image/jpeg` directly, without a redirect.
+Preserve any updated cookies from the response.
+
+Earlier client analysis reported a `302` self-redirect; that behavior remains
+**Inferred**. If one is present, replay the same challenge URL with the cookie
+jar and use the latest cookies. This branch is not required for the direct
+`200` response observed in the live test.
+
+### Retry using `POST /fe/api/problem/submit/{pid}`
+
+After solving the image, retry the original submission with the same base body
+plus a single `captcha` string:
+
+```json
+{
+  "lang": 27,
+  "code": "<complete-source-text>",
+  "enableO2": 1,
+  "captcha": "<recognized-image-text>"
+}
+```
+
+The live retry returned HTTP `200` with a RID and the record subsequently
+reached Accepted. CAPTCHA answers are single-use. Limit retries and stop when
+the challenge cannot be solved reliably; do not retry an invalid answer in a
+loop.
+
+The following details remain **Unverified**:
+
+- whether `_t` is required rather than merely accepted;
+- whether a `302` can also occur in other sessions;
+- retry-count and rate-limit boundaries;
+- interactive challenge providers and token encoding.
+
+The client should enter this branch only after observing the CAPTCHA error and
+should not prefetch a submission CAPTCHA for every submission.
 
 ## Error handling
 
@@ -633,29 +843,40 @@ HTTP success alone is not enough to prove an API operation succeeded:
 - Check Lentille responses for `template: "error"` and an error envelope status.
 - Stop on malformed or unexpected content and surface a diagnostic.
 
-The generic envelopes in the pre-review document are **Unverified** because the
-capture contains no failing JSON response for login, submission, or record
-retrieval. Do not match on user-facing error messages. If matching exceptions,
-use exact documented identifiers only after adding evidence for them.
+The HTTP `403` submission error and
+`InvalidCaptchaException` identifier are verified by the live test. Other
+failure envelopes for login, submission, and record retrieval remain
+**Unverified**. Do not match on user-facing error messages. Use only exact
+identifiers that have supporting evidence.
 
 ## Evidence
 
-The primary evidence is:
+Evidence comes from two sanitized observation sets:
 
-- `.artifacts/packet1.pcapng`
-- `.artifacts/ssl-key.log`
-- `.artifacts/packet1.md`
+- Browser-observed requests and responses from 2026-10-24.
+- A controlled live submission test on 2026-10-26.
 
-Capture metadata:
+Raw traffic, decryption material, credentials, and temporary challenge files
+are not part of this documentation.
+
+Browser-observation metadata:
 
 | Property | Value |
 |---|---|
-| Packets | 8956 |
-| Capture duration | 105.051 seconds |
-| First packet | 2026-10-24 21:43:15 (UTC+8) |
-| Last packet | 2026-10-24 21:45:00 (UTC+8) |
+| Date | 2026-10-24 (UTC+8) |
 | Protocol | TLS with HTTP/2 and HTTP/1.1 WebSocket |
 
-The capture and TLS key log can decrypt account-specific traffic. They are
-local evidence artifacts and must not be published. The repository ignores
-`.artifacts/`.
+Live-test metadata:
+
+| Property | Value |
+|---|---|
+| Date | 2026-10-26 (UTC+8) |
+| Problem | `P1001` |
+| Authentication source | Existing authenticated session |
+| Observed statuses | `200` root, `403` submission, `200` CAPTCHA image, `200` submission, `200` record |
+| Problem-page requests | `0` |
+| Final judge status | `12` (Accepted), 10/10 test cases |
+| Protocol | HTTPS |
+
+Credentials, cookies, CSRF values, CAPTCHA answers, and real RIDs are omitted
+from this document and from all published examples.
