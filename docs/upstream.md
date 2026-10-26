@@ -296,7 +296,7 @@ languages whose `disabled` field is `true`. Do not hard-code the mapping.
 
 Selected language values observed in this configuration:
 
-| ID | Name | O2 supported |
+| ID | Name | `canO2` |
 |---:|---|:---:|
 | `27` | C++20 | Yes |
 | `34` | C++23 | Yes |
@@ -310,6 +310,42 @@ Selected language values observed in this configuration:
 
 The complete configuration contained 35 entries, 27 enabled and 8 disabled.
 These counts are observations from the capture, not permanent guarantees.
+
+### O2 capability
+
+Each `CodeLanguage` entry has a boolean `canO2` field. In the captured
+configuration, the following entries had `canO2: true`:
+
+| ID | Name |
+|---:|---|
+| `1` | Pascal |
+| `2` | C |
+| `3` | C++98 |
+| `4` | C++11 |
+| `11` | C++14 |
+| `12` | C++17 |
+| `27` | C++20 |
+| `28` | C++14 (GCC 9) |
+| `34` | C++23 |
+| `15` | Rust |
+| `19` | Haskell |
+| `30` | OCaml |
+
+Java 8, Java 21, Python 3, PyPy 3, Go, Julia, Lua, Kotlin/JVM, Scala,
+C# Mono, Node.js, PHP, Ruby, and Perl had `canO2: false` in the same
+configuration. O2 support is therefore not limited to C and C++, nor is it
+available for every enabled language.
+
+The client should read `canO2` at runtime and reject an O2 request for a
+language whose capability is false. A controlled live submission on 2026-10-26
+sent Java 21 with `enableO2: 1`; the submission returned HTTP `200`, but the
+terminal record contained `enableO2: false`. This shows that the server may
+silently downgrade the request rather than reject it.
+
+The client-side constraint is therefore stronger than the HTTP contract:
+unknown, disabled, or `canO2: false` languages are rejected before an O2
+submission is sent. The client must not use the server's silent downgrade as a
+capability check or treat the resulting record as proof that O2 was enabled.
 
 ## Authentication
 
@@ -528,6 +564,12 @@ describe this page response; they are not required inputs to submission. The
 live test obtained a usable CSRF token from `GET /` instead and did not request
 this endpoint.
 
+The captured P1001 HTML also embedded an `acceptLanguages` array in page data.
+Its extraction contract and consistency with other problems are **Inferred**:
+the HTML was observed, but no stable public JSON response was exercised. Treat
+problem-specific language restrictions as optional cached hints and do not
+require a problem-page request for submission.
+
 ## `POST /fe/api/problem/submit/{pid}`
 
 **Evidence:** Verified by the browser capture on 2026-10-24, then revalidated by
@@ -563,6 +605,10 @@ Cookie: <authenticated-cookie-jar>
 
 The capture used `lang: 34` for C++23. The example above uses `27` only
 because C++20 is enabled in the captured configuration.
+
+Use the runtime `canO2` capability rather than assuming which languages accept
+O2. The endpoint can return HTTP `200` for an unsupported O2 request while the
+resulting record records `enableO2: false`.
 
 The request combines data from independent sources:
 
@@ -672,10 +718,16 @@ Important distinctions:
 
 - Top-level `status` is the Lentille envelope status.
 - `data.record.status` is the current judge status.
+- `data.record.enableO2` is the O2 state associated with this record. It can be
+  false even when an unsupported language was submitted with `enableO2: 1`.
 - `data.record.detail.compileResult` contains compilation state and diagnostics.
 - `data.record.detail.judgeResult` contains case progress, score, and subtasks.
 - `data.record.problem.accepted` describes the user/problem relationship and
   is not the verdict for this record.
+
+Do not infer language O2 capability from `compileResult.opt2`. That field was
+false in observed terminal records for Java 21, Rust, and C++20, despite their
+different runtime `canO2` values.
 
 While `data.record.status` is `0`, the record is still waiting. The capture
 shows `compileResult.success: false` even for this pending, non-terminal
@@ -851,10 +903,11 @@ identifiers that have supporting evidence.
 
 ## Evidence
 
-Evidence comes from two sanitized observation sets:
+Evidence comes from three sanitized observation sets:
 
 - Browser-observed requests and responses from 2026-10-24.
 - A controlled live submission test on 2026-10-26.
+- Controlled O2 capability probes on 2026-10-26.
 
 Raw traffic, decryption material, credentials, and temporary challenge files
 are not part of this documentation.
@@ -877,6 +930,13 @@ Live-test metadata:
 | Problem-page requests | `0` |
 | Final judge status | `12` (Accepted), 10/10 test cases |
 | Protocol | HTTPS |
+
+The additional O2 probes used minimal P1001 submissions in Java 21, Python 3,
+Rust, and C++20. The Java 21 record observed with a top-level `enableO2` field
+contained `enableO2: false` after an `enableO2: 1` request. Other probe results
+do not prove that the compiler applied O2 solely from the record fields
+described here. No credentials, CAPTCHA answers, or real RIDs are retained in
+this document.
 
 Credentials, cookies, CSRF values, CAPTCHA answers, and real RIDs are omitted
 from this document and from all published examples.
