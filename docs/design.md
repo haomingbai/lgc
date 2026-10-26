@@ -27,13 +27,20 @@ unverified interactive challenge protocols are out of scope.
 
 ## Component model
 
-The system has three components:
+The system has three top-level components:
 
 | Component | Role | May depend on |
 |---|---|---|
-| `cmd` | Executable and composition root; parses commands, selects providers, and orchestrates workflows | `lib`, `plugin` |
+| `cmd` | Executable and composition root; reads invocation input, generates runtime resources, and executes one workflow | `lib`, `plugin` |
 | `lib` | Common library; owns domain values, stable ports, public workflows, and protocol policy | External modules and its own packages |
 | `plugin` | Concrete implementations of library ports | `lib` |
+
+The `cmd` component is itself a one-way pipeline of four internal components:
+an argument reader, a configuration reader, a resource generator, and an
+executor. The configuration reader consumes the argument reader's invocation
+because a later command-line option will let the user select the configuration
+file location. The resource generator depends on both reads, and the executor
+receives only the generated execution bundle.
 
 The dependency direction is deliberate:
 
@@ -46,10 +53,15 @@ The dependency direction is deliberate:
 flowchart TB
     subgraph CMD["cmd component"]
         Main["main"]
-        Commands["login / submit"]
-        Composer["provider registry<br/>and composition"]
-        Main --> Commands
-        Main --> Composer
+        Args["argument reader"]
+        Config["configuration reader"]
+        Generate["resource generator"]
+        Execute["executor"]
+        Main --> Args
+        Args --> Config
+        Args --> Generate
+        Config --> Generate
+        Generate --> Execute
     end
 
     subgraph LIB["lib component"]
@@ -65,12 +77,12 @@ flowchart TB
         Problem["problem-content providers"]
     end
 
-    Commands --> Core
-    Composer --> Contracts
-    Composer --> Captcha
-    Composer --> Store
-    Composer --> Updates
-    Composer --> Problem
+    Execute --> Core
+    Generate --> Contracts
+    Generate --> Captcha
+    Generate --> Store
+    Generate --> Updates
+    Generate --> Problem
     Captcha -.->|"implements"| Contracts
     Store -.->|"implements"| Contracts
     Updates -.->|"implements"| Contracts
@@ -81,19 +93,25 @@ The component boundary is also an execution boundary:
 
 ```mermaid
 sequenceDiagram
-    participant C as cmd
-    participant L as lib
+    participant A as argument reader
+    participant C as configuration reader
+    participant R as resource generator
+    participant E as executor
     participant P as plugin
+    participant L as lib
     participant U as Luogu
 
-    C->>C: parse command and configuration
-    C->>P: select and initialize providers
-    P-->>C: interfaces declared by lib
-    C->>L: construct core services with selected ports
+    A-->>C: Invocation with optional config path
+    C-->>R: Invocation and Configuration
+    R->>P: select and initialize providers
+    P-->>R: interfaces declared by lib
+    R->>L: construct core services
+    R-->>E: ExecutionResources
+    E->>L: run one workflow
     L->>P: call a selected interface
     L->>U: perform the protocol operation
-    L-->>C: typed command result
-    C->>C: persist state and render output
+    L-->>E: typed command result
+    E->>E: persist state, render output, and close resources
 ```
 
 ## Module map
@@ -103,7 +121,7 @@ while implementation decisions evolve.
 
 | Module | Responsibility | Detailed design |
 |---|---|---|
-| Command provider | CLI surface, configuration, plugin selection, orchestration, output, and exit status | [cmd.md](design/cmd.md) |
+| Command provider | Four-stage CLI pipeline: argument read, configuration read, resource generation, execution, output, and exit status | [cmd.md](design/cmd.md) |
 | Common library | Public contracts, package boundaries, shared invariants, and core workflow integration | [lib.md](design/lib.md) |
 | Plugin provider | Provider contract, registration, selection, lifecycle, compatibility, and built-in adapters | [plugin.md](design/plugin.md) |
 | Authentication | Credentials, login exchange, independent user and session state, and session snapshots | [lib/auth.md](design/lib/auth.md) |
@@ -171,6 +189,9 @@ Two rules apply to every flow:
 6. CAPTCHA has two interchangeable implementations: an external command that
    receives an image path, and a multimodal API client. The selected
    implementation never changes submission retry policy.
+7. `cmd` composes resources before execution and runs exactly one command. Its
+   argument, configuration, resource, and executor layers communicate in one
+   direction; the executor never reads arguments or configuration again.
 
 ## Open technical risks
 
@@ -188,6 +209,8 @@ Two rules apply to every flow:
 
 - [ ] Each component respects the dependency direction in the architecture
       diagram.
+- [ ] The `cmd` argument, configuration, resource, and executor stages keep
+      their documented input, output, and lifecycle ownership boundaries.
 - [ ] Each crosscutting rule has one authoritative module.
 - [ ] Every plugin implements an interface declared by `lib`.
 - [ ] Command behavior does not add a second validation or policy layer.
