@@ -7,9 +7,10 @@ local unit tests.
 
 The intended workflow is:
 
-1. Authenticate with the Luogu web service while keeping the human CAPTCHA step
-   under user control.
-2. Open a problem and resolve its runtime submission state.
+1. Authenticate with the Luogu web service through an explicitly configured
+   CAPTCHA solver.
+2. Resolve the problem identity and runtime submission state; opening the
+   problem page is optional for source-code submission.
 3. Resolve the correct language ID from Luogu's runtime configuration.
 4. Submit source code and receive a judge record ID.
 5. Wait for asynchronous judging through record polling or WebSocket updates.
@@ -24,3 +25,10 @@ command is documented here.
 
 All project documentation and contribution requirements are maintained under
 [`docs/`](docs/).
+
+The proposed client architecture starts at
+[`docs/design.md`](docs/design.md), with component and library-module designs
+under [`docs/design/`](docs/design/).
+
+The initial CLI design exposes only authentication and submission. It does not
+expose problem-content fetching.
