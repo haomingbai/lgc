@@ -1,2 +1,5 @@
 # Objects for test and learning
 .artifacts/
+
+# Local test coverage output
+coverage.out
